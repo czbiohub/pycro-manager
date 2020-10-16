@@ -25,7 +25,7 @@ copyright = '2020, Henry Pinkard'
 author = 'Henry Pinkard'
 
 # The full version, including alpha/beta/rc tags
-release = '0.0.1'
+# release = '0.0.1'
 
 
 # -- General configuration ---------------------------------------------------
@@ -33,7 +33,7 @@ release = '0.0.1'
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-extensions = ['sphinx.ext.autodoc', 'nbsphinx']
+extensions = ['sphinx.ext.autodoc', 'sphinx.ext.napoleon', 'nbsphinx']
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -45,6 +45,9 @@ exclude_patterns = []
 
 #this is needed for read the docs
 master_doc = 'index'
+
+#dont look for errors in notebook cells
+nbsphinx_allow_errors = True
 
 #this is to make constructor docstrings show up
 autoclass_content = 'both'

@@ -56,13 +56,18 @@ class _MultipageTiffReader:
                                  self.summary_md['PixelType'] == 'RGB32' else np.uint16
 
     def close(self):
+        """ """
         self.file.close()
 
     def _read_header(self):
         """
-        :param file:
-        :return: dictionary with summary metadata, nested dictionary of byte offsets of TIFF Image File Directories with
-        keys [channel_index][z_index][frame_index][position_index], int byte offset of first image IFD
+        Returns
+        -------
+        summary metadata : dict
+        byte offsets : nested dict
+            The byte offsets of TIFF Image File Directories with keys [channel_index][z_index][frame_index][position_index]
+        first_image_byte_offset : int
+            int byte offset of first image IFD
         """
         # read standard tiff header
         if self.mmap_file[:2] == b'\x4d\x4d':
@@ -83,6 +88,9 @@ class _MultipageTiffReader:
         index_map_offset_header, index_map_offset = np.frombuffer(self.mmap_file[8:16], dtype=np.uint32)
         if index_map_offset_header != self.INDEX_MAP_OFFSET_HEADER:
             raise Exception('Index map offset header wrong')
+        # int.from_bytes(self.mmap_file[24:28], sys.byteorder) # should be equal to 483729 starting in version 1
+        self._major_version = int.from_bytes(self.mmap_file[28:32], sys.byteorder)
+
         summary_md_header, summary_md_length = np.frombuffer(self.mmap_file[32:40], dtype=np.uint32)
         if summary_md_header != self.SUMMARY_MD_HEADER:
             raise Exception('Index map offset header wrong')
@@ -125,7 +133,7 @@ class _MultipageTiffReader:
 
     def _read(self, start, end):
         """
-        Convert to python ints
+        convert to python ints
         """
         return self.np_memmap[int(start):int(end)].tobytes()
 
@@ -133,7 +141,16 @@ class _MultipageTiffReader:
         """
         Read image file directory. First two bytes are number of entries (n), next n*12 bytes are individual IFDs, final 4
         bytes are next IFD offset location
-        :return: dictionary with fields needed for reading
+
+        Parameters
+        ----------
+        byte_offset :
+
+        Returns
+        -------
+        dict : 
+            dictionary with fields needed for reading
+
         """
         num_entries = np.frombuffer(self._read(byte_offset, byte_offset + 2), dtype=np.uint16)[0]
         info = {}
@@ -211,8 +228,14 @@ class _ResolutionLevel:
 
     def __init__(self, path, count, max_count):
         """
-        open all tiff files in directory, keep them in a list, and a tree based on image indices
-        :param path:
+        Open all tiff files in directory, keep them in a list, and a tree based on image indices
+
+        Parameters
+        ----------
+        path : str
+        count : int
+        max_count : int
+
         """
         tiff_names = [os.path.join(path, tiff) for tiff in os.listdir(path) if tiff.endswith('.tif')]
         self.reader_list = []
@@ -237,16 +260,70 @@ class _ResolutionLevel:
                             self.reader_tree[c][z][t][p] = reader
 
     def read_image(self, channel_index=0, z_index=0, t_index=0, pos_index=0, read_metadata=False, memmapped=False):
+        """
+
+        Parameters
+        ----------
+        channel_index : int
+             (Default value = 0)
+        z_index : int
+             (Default value = 0)
+        t_index : int
+             (Default value = 0)
+        pos_index : int
+             (Default value = 0)
+        read_metadata : bool
+             (Default value = False)
+        memmapped : bool
+             (Default value = False)
+
+        Returns
+        -------
+        image :
+        """
         # determine which reader contains the image
         reader = self.reader_tree[channel_index][z_index][t_index][pos_index]
         return reader.read_image(channel_index, z_index, t_index, pos_index, read_metadata, memmapped)
 
     def read_metadata(self, channel_index=0, z_index=0, t_index=0, pos_index=0):
+        """
+
+        Parameters
+        ----------
+        channel_index : int
+             (Default value = 0)
+        z_index : int
+             (Default value = 0)
+        t_index : int
+             (Default value = 0)
+        pos_index : int
+             (Default value = 0)
+
+        Returns
+        -------
+        image_metadata
+        """
         # determine which reader contains the image
         reader = self.reader_tree[channel_index][z_index][t_index][pos_index]
         return reader.read_metadata(channel_index, z_index, t_index, pos_index)
 
     def check_ifd(self, channel_index=0, z_index=0, t_index=0, pos_index=0):
+        """
+
+        Parameters
+        ----------
+        channel_index : int
+             (Default value = 0)
+        z_index : int
+             (Default value = 0)
+        t_index : int
+             (Default value = 0)
+        pos_index : int
+             (Default value = 0)
+
+        Returns
+        -------
+        """
         # determine which reader contains the image
         reader = self.reader_tree[channel_index][z_index][t_index][pos_index]
         return reader.check_ifd(channel_index, z_index, t_index, pos_index)
@@ -257,9 +334,7 @@ class _ResolutionLevel:
 
 
 class Dataset:
-    """
-    Class that opens a single NDTiffStorage dataset
-    """
+    """Class that opens a single NDTiffStorage dataset"""
 
     _POSITION_AXIS = 'position'
     _Z_AXIS = 'z'
@@ -268,6 +343,8 @@ class Dataset:
 
 
     def __init__(self, dataset_path=None, full_res_only=True, remote_storage=None):
+        self._tile_width = None
+        self._tile_height = None
         if remote_storage is not None:
             #this dataset is a view of an active acquisiiton. The storage exists on the java side
             self._remote_storage = remote_storage
@@ -372,19 +449,25 @@ class Dataset:
                 self.res_levels[int(np.log2(int(res_dir.split('x')[1])))] = res_level
         print('\rDataset opened')
 
-    def as_array(self, stitched=False):
+    def as_array(self, stitched=False, verbose=False):
         """
         Read all data image data as one big Dask array with last two axes as y, x and preceeding axes depending on data.
         The dask array is made up of memory-mapped numpy arrays, so the dataset does not need to be able to fit into RAM.
         If the data doesn't fully fill out the array (e.g. not every z-slice collected at every time point), zeros will
         be added automatically.
-
+        
         To convert data into a numpy array, call np.asarray() on the returned result. However, doing so will bring the
         data into RAM, so it may be better to do this on only a slice of the array at a time.
 
-        :param stitched: If true and tiles were acquired in a grid, lay out adjacent tiles next to one another
-        :type stitched: boolean
-        :return:
+        Parameters
+        ----------
+        stitched : bool
+            If true and tiles were acquired in a grid, lay out adjacent tiles next to one another (Default value = False)
+        verbose : bool
+            If True print updates on progress loading the image
+        Returns
+        -------
+        dataset : dask array
         """
         if self._remote_storage is not None:
             raise Exception('Method not yet implemented for in progress acquisitions')
@@ -395,7 +478,8 @@ class Dataset:
 
         def recurse_axes(loop_axes, point_axes):
             if len(loop_axes.values()) == 0:
-                print('\rAdding data chunk {} of {}'.format(self._count, total), end='')
+                if verbose:
+                    print('\rAdding data chunk {} of {}'.format(self._count, total), end='')
                 self._count += 1
                 if None not in point_axes.values() and self.has_image(**point_axes):
                     return self.read_image(**point_axes, memmapped=True)
@@ -426,7 +510,8 @@ class Dataset:
                     for row in row_col_mat:
                         blocks.append([])
                         for p_index in row:
-                            print('\rAdding data chunk {} of {}'.format(self._count, total), end='')
+                            if verbose:
+                                print('\rAdding data chunk {} of {}'.format(self._count, total), end='')
                             valed_axes = point_axes.copy()
                             valed_axes[axis] = int(p_index) if not np.isnan(p_index) else None
                             blocks[-1].append(da.stack(recurse_axes(remaining_axes, valed_axes)))
@@ -447,17 +532,20 @@ class Dataset:
                     return blocks
         blocks = recurse_axes(self.axes, {})
 
-        print('Stacking tiles')
+        if verbose:
+            print(' Stacking tiles') # extra space otherwise there is no space after the "Adding data chunk {} {}"
         array = da.stack(blocks)
-        print('\rDask array opened')
+        if verbose:
+            print('\rDask array opened')
         return array
 
     def _convert_to_storage_axes(self, axes, channel_name=None):
-        """
-        Convert an abitrary set of axes to cztp axes as in the underlying storage
+        """Convert an abitrary set of axes to cztp axes as in the underlying storage
 
-        :param axes:
-        :return:
+        Parameters
+        ----------
+        axes
+        channel_name
         """
         if channel_name is not None:
             if channel_name not in self._channel_names.keys():
@@ -480,27 +568,34 @@ class Dataset:
 
     def has_image(self, channel=None, z=None, time=None, position=None,
                   channel_name=None, resolution_level=0, row=None, col=None, **kwargs):
-        """
-        Check if this image is present in the dataset
+        """Check if this image is present in the dataset
 
-        :param channel: index of the channel, if applicable
-        :type channel: int
-        :param z: index of z slice, if applicable
-        :type z: int
-        :param time: index of the time point, if applicable
-        :type time: int
-        :param position: index of the XY position, if applicable
-        :type position: int
-        :param channel_name: Name of the channel. Overrides channel index if supplied
-        :type channel_name: str
-        :param row: index of tile row for XY tiled datasets
-        :type row: int
-        :param col: index of tile col for XY tiled datasets
-        :type col: int
-        :param resolution_level: 0 is full resolution, otherwise represents downampling of pixels
-            at 2 ** (resolution_level)
-        :param kwargs: names and integer positions of any other axes
-        :return: boolean indicating whether image present
+        Parameters
+        ----------
+        channel : int
+            index of the channel, if applicable (Default value = None)
+        z : int
+            index of z slice, if applicable (Default value = None)
+        time : int
+            index of the time point, if applicable (Default value = None)
+        position : int
+            index of the XY position, if applicable (Default value = None)
+        channel_name : str
+            Name of the channel. Overrides channel index if supplied (Default value = None)
+        row : int
+            index of tile row for XY tiled datasets (Default value = None)
+        col : int
+            index of tile col for XY tiled datasets (Default value = None)
+        resolution_level :
+            0 is full resolution, otherwise represents downampling of pixels
+            at 2 ** (resolution_level) (Default value = 0)
+        **kwargs
+            Arbitrary keyword arguments
+
+        Returns
+        -------
+        bool :
+            indicating whether the dataset has an image matching the specifications
         """
         if channel is not None:
             kwargs['channel'] = channel
@@ -538,23 +633,37 @@ class Dataset:
         """
         Read image data as numpy array
 
-        :param channel: index of the channel, if applicable
-        :type channel: int
-        :param z: index of z slice, if applicable
-        :type z: int
-        :param time: index of the time point, if applicable
-        :type time: int
-        :param position: index of the XY position, if applicable
-        :type position: int
-        :param channel_name: Name of the channel. Overrides channel index if supplied
-        :param row: index of tile row for XY tiled datasets
-        :type row: int
-        :param col: index of tile col for XY tiled datasets
-        :type col: int
-        :param resolution_level: 0 is full resolution, otherwise represents downampling of pixels
-            at 2 ** (resolution_level)
-        :param kwargs: names and integer positions of any other axes
-        :return: image as 2D numpy array, or tuple with image and image metadata as dict
+        Parameters
+        ----------
+        channel : int
+            index of the channel, if applicable (Default value = None)
+        z : int
+            index of z slice, if applicable (Default value = None)
+        time : int
+            index of the time point, if applicable (Default value = None)
+        position : int
+            index of the XY position, if applicable (Default value = None)
+        channel_name :
+            Name of the channel. Overrides channel index if supplied (Default value = None)
+        row : int
+            index of tile row for XY tiled datasets (Default value = None)
+        col : int
+            index of tile col for XY tiled datasets (Default value = None)
+        resolution_level :
+            0 is full resolution, otherwise represents downampling of pixels
+            at 2 ** (resolution_level) (Default value = 0)
+        read_metadata : bool
+             (Default value = False)
+        memmapped : bool
+             (Default value = False)
+        **kwargs :
+            names and integer positions of any other axes
+
+        Returns
+        -------
+        image : numpy array or tuple
+            image as a 2D numpy array, or tuple with image and image metadata as dict
+
         """
         if channel is not None:
             kwargs['channel'] = channel
@@ -582,9 +691,10 @@ class Dataset:
             if resolution_level == 0:
                 image = np.reshape(tagged_image.pix,
                                     newshape=[tagged_image.tags['Height'], tagged_image.tags['Width']])
-                #crop down to just the part that shows (i.e. no overlap)
-                image = image[(image.shape[0] - self._tile_height) // 2: -(image.shape[0] - self._tile_height) // 2,
-                            (image.shape[0] - self._tile_width) // 2: -(image.shape[0] - self._tile_width) // 2]
+                if (self._tile_height is not None) and (self._tile_width is not None):
+                    #crop down to just the part that shows (i.e. no overlap)
+                    image = image[(image.shape[0] - self._tile_height) // 2: -(image.shape[0] - self._tile_height) // 2,
+                                (image.shape[1] - self._tile_width) // 2: -(image.shape[1] - self._tile_width) // 2]
             else:
                 image = np.reshape(tagged_image.pix, newshape=[self._tile_height, self._tile_width])
             if read_metadata:
@@ -603,25 +713,34 @@ class Dataset:
     def read_metadata(self, channel=None, z=None, time=None, position=None,
                         channel_name=None, row=None, col=None, resolution_level=0, **kwargs):
         """
-        Read metadata only. Faster than using read_image to retireve metadata
+        Read metadata only. Faster than using read_image to retrieve metadata
 
-        :param channel: index of the channel, if applicable
-        :type channel: int
-        :param z: index of z slice, if applicable
-        :type z: int
-        :param time: index of the time point, if applicable
-        :type time: int
-        :param position: index of the XY position, if applicable
-        :type position: int
-        :param channel_name: Name of the channel. Overrides channel index if supplied
-        :param row: index of tile row for XY tiled datasets
-        :type row: int
-        :param col: index of tile col for XY tiled datasets
-        :type col: int
-        :param resolution_level: 0 is full resolution, otherwise represents downampling of pixels
-            at 2 ** (resolution_level)
-        :param kwargs: names and integer positions of any other axes
-        :return: image metadata as dict
+        Parameters
+        ----------
+        channel : int
+            index of the channel, if applicable (Default value = None)
+        z : int
+            index of z slice, if applicable (Default value = None)
+        time : int
+            index of the time point, if applicable (Default value = None)
+        position : int
+            index of the XY position, if applicable (Default value = None)
+        channel_name :
+            Name of the channel. Overrides channel index if supplied (Default value = None)
+        row : int
+            index of tile row for XY tiled datasets (Default value = None)
+        col : int
+            index of tile col for XY tiled datasets (Default value = None)
+        resolution_level :
+            0 is full resolution, otherwise represents downampling of pixels
+            at 2 ** (resolution_level) (Default value = 0)
+        **kwargs :
+            names and integer positions of any other axes
+            
+        Returns
+        -------
+        metadata : dict
+
         """
         if channel is not None:
             kwargs['channel'] = channel

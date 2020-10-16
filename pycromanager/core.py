@@ -9,6 +9,7 @@ import numpy as np
 import zmq
 from weakref import WeakSet
 import threading
+import copy
 
 
 class JavaSocket:
@@ -127,14 +128,16 @@ class Bridge:
 
     def __init__(self, port=_DEFAULT_PORT, convert_camel_case=True, debug=False):
         """
-        :param port: The port on which the bridge operates
-        :type port: int
-        :param convert_camel_case: If true, methods for Java objects that are passed across the bridge
+        Parameters
+        ----------
+        port : int
+            The port on which the bridge operates
+        convert_camel_case : bool
+            If True, methods for Java objects that are passed across the bridge
             will have their names converted from camel case to underscores. i.e. class.methodName()
             becomes class.method_name()
-        :type convert_camel_case: boolean
-        :param debug: print helpful stuff for debugging
-        :type debug: bool
+        debug : bool
+            If True print helpful stuff for debugging
         """
         if not hasattr(self, '_context'):
             Bridge._context = zmq.Context()
@@ -169,13 +172,19 @@ class Bridge:
         just like the object on the Java side (i.e. same methods, fields). Methods of the object can be inferred at
         runtime using iPython autocomplete
 
-        :param classpath: Full classpath of the java object
-        :type classpath: string
-        :param new_socket: If true, will create new java object on a new port so that blocking calls will not interfere
+        Parameters
+        ----------
+        classpath : str
+            Full classpath of the java object
+        new_socket : bool
+            If True, will create new java object on a new port so that blocking calls will not interfere
             with the bridges master port
-        :param args: list of arguments to the constructor, if applicable
-        :type args: list
-        :return: Python  "Shadow" to the Java object
+        args : list
+            list of arguments to the constructor, if applicable
+        Returns
+        -------
+        
+        Python  "Shadow" to the Java object
         """
         if args is None:
             args = []
@@ -188,11 +197,12 @@ class Bridge:
         methods_with_name = [m for m in constructors if m['name'] == classpath]
         if len(methods_with_name) == 0:
             raise Exception('No valid java constructor found with classpath {}'.format(classpath))
-        valid_method_spec = _check_method_args(methods_with_name, args)
+        valid_method_spec, deserialize_types = _check_method_args(methods_with_name, args)
 
         # Calling a constructor, rather than getting return from method
         message = {'command': 'constructor', 'classpath': classpath,
                    'argument-types': valid_method_spec['arguments'],
+                   'argument-deserialization-types': deserialize_types,
                    'arguments': _package_arguments(valid_method_spec, args)}
         if new_socket:
             message['new-port'] = True
@@ -351,16 +361,20 @@ class JavaObjectShadow:
     def _translate_call(self, method_specs, fn_args: tuple):
         """
         Translate to appropriate Java method, call it, and return converted python version of its result
-        :param args: args[0] is list of dictionaries of possible method specifications
-        :param kwargs: hold possible polymorphic args, or none
-        :return:
+        Parameters
+        ----------
+        args :
+             args[0] is list of dictionaries of possible method specifications
+        kwargs :
+             hold possible polymorphic args, or none
         """
         #args that are none are placeholders to allow for polymorphism and not considered part of the spec
         # fn_args = [a for a in fn_args if a is not None]
-        valid_method_spec = _check_method_args(method_specs, fn_args)
+        valid_method_spec, deserialize_types = _check_method_args(method_specs, fn_args)
         #args are good, make call through socket, casting the correct type if needed (e.g. int to float)
         message = {'command': 'run-method', 'hash-code': self._hash_code, 'name': valid_method_spec['name'],
-                   'argument-types': valid_method_spec['arguments']}
+                   'argument-types': valid_method_spec['arguments'],
+                   'argument-deserialization-types': deserialize_types}
         message['arguments'] = _package_arguments(valid_method_spec, fn_args)
 
         self._socket.send(message)
@@ -368,9 +382,13 @@ class JavaObjectShadow:
 
     def _deserialize(self, json_return):
         """
-        :param method_spec: info about the method that called it
-        :param reply: bytes that represents return
-        :return: an appropriate python type of the converted value
+        method_spec :
+             info about the method that called it
+        reply :
+            bytes that represents return
+        Returns
+        -------
+        An appropriate python type of the converted value
         """
         if json_return['type'] == 'exception':
             raise Exception(json_return['value'])
@@ -401,8 +419,9 @@ def serialize_array(array):
 def deserialize_array(json_return):
     """
     Convert a serialized java array to the appropriate numpy type
-    :param json_return:
-    :return:
+    Parameters
+    ----------
+    json_return
     """
     if json_return['type'] == 'byte-array':
         return np.frombuffer(standard_b64decode(json_return['value']), dtype='>u1').copy()
@@ -419,9 +438,11 @@ def deserialize_array(json_return):
 def _package_arguments(valid_method_spec, fn_args):
     """
     Serialize function arguments and also include description of their Java types
-    :param valid_method_spec:
-    :param fn_args:
-    :return:
+
+    Parameters
+    ----------
+    valid_method_spec:
+    fn_args :
     """
     arguments = []
     for arg_type, arg_val in zip(valid_method_spec['arguments'], fn_args):
@@ -430,6 +451,8 @@ def _package_arguments(valid_method_spec, fn_args):
         elif _JAVA_TYPE_NAME_TO_PYTHON_TYPE[arg_type] is object:
             arguments.append(_serialize_arg(arg_val))
         elif arg_val is None:
+            arguments.append(_serialize_arg(arg_val))
+        elif isinstance(arg_val, np.ndarray):
             arguments.append(_serialize_arg(arg_val))
         else:
             arguments.append(_serialize_arg(_JAVA_TYPE_NAME_TO_PYTHON_TYPE[arg_type](arg_val)))
@@ -451,9 +474,11 @@ def _serialize_arg(arg):
 def _check_single_method_spec(method_spec, fn_args):
     """
     Check if a single method specificiation is compatible with the arguments the function recieved
-    :param method_spec:
-    :param fn_args:
-    :return:
+
+    Parameters
+    ----------
+    method_spec :
+    fn_args :
     """
     if len(method_spec['arguments']) != len(fn_args):
         return False
@@ -464,7 +489,7 @@ def _check_single_method_spec(method_spec, fn_args):
                 return False
         elif type(arg_val) == np.ndarray:
             # For ND Arrays, need to make sure data types match
-            if _ARRAY_TYPE_TO_NUMPY_DTYPE[arg_java_type] != arg_val.dtype:
+            if arg_java_type != 'java.lang.Object' and arg_val.dtype.type != _JAVA_ARRAY_TYPE_NUMPY_DTYPE[arg_java_type]:
                 return False
         elif not any([isinstance(arg_val, acceptable_type) for acceptable_type in
                       _JAVA_TYPE_NAME_TO_CASTABLE_PYTHON_TYPE[arg_java_type]]) and \
@@ -476,11 +501,16 @@ def _check_single_method_spec(method_spec, fn_args):
 def _check_method_args(method_specs, fn_args):
     """
     Compare python arguments to java arguments to find correct function to call
-    :param method_specs:
-    :param fn_args:
-    :return: one of the method_specs that is valid
+
+    Parameters
+    ----------
+    method_specs :
+    fn_args :
+
+    Returns
+    -------
+    one of the method_specs that is valid
     """
-    # TODO: check that args can be translated to expected java counterparts (e.g. numpy arrays)
     valid_method_spec = None
     for method_spec in method_specs:
         if _check_single_method_spec(method_spec, fn_args):
@@ -491,7 +521,20 @@ def _check_method_args(method_specs, fn_args):
         raise Exception('Incorrect arguments. \nExpected {} \nGot {}'.format(
             ' or '.join([', '.join(method_spec['arguments']) for method_spec in method_specs]),
             ', '.join([str(type(a)) for a in fn_args]) ))
-    return valid_method_spec
+
+    # subclass NDArrays to the appropriate data type so they dont get incorrectly reconstructed as objects
+    valid_method_spec = copy.deepcopy(valid_method_spec)
+    deserialize_types = []
+    for java_arg_class, python_arg_val in zip(valid_method_spec['arguments'], fn_args):
+        if isinstance(python_arg_val, np.ndarray):
+            deserialize_types.append([ja for ja, npdt in
+                             zip(_JAVA_ARRAY_TYPE_NUMPY_DTYPE.keys(), _JAVA_ARRAY_TYPE_NUMPY_DTYPE.values())
+                             if python_arg_val.dtype.type == npdt][0])
+        else:
+            deserialize_types.append(java_arg_class)
+
+
+    return valid_method_spec, deserialize_types
 
 
 def _parse_arg_names(methods, method_name, convert_camel_case):
@@ -535,10 +578,10 @@ _CLASS_NAME_MAPPING = {'boolean': 'boolean', 'byte[]': 'uint8array',
                        'double': 'float', 'double[]': 'float64_array', 'float': 'float',
                        'int': 'int', 'int[]': 'uint32_array', 'java.lang.String': 'string',
                        'long': 'int', 'short': 'int', 'void': 'void'}
-_ARRAY_TYPE_TO_NUMPY_DTYPE = {'byte[]': np.uint8, 'double[]': np.float64, 'int[]': np.int32}
-_JAVA_TYPE_NAME_TO_PYTHON_TYPE = {'boolean': bool, 'byte[]': np.ndarray,
-                                  'double': float, 'double[]': np.ndarray, 'float': float,
-                                  'int': int, 'int[]': np.ndarray, 'java.lang.String': str,
+_JAVA_ARRAY_TYPE_NUMPY_DTYPE = {'byte[]': np.uint8, 'short[]': np.uint16, 'double[]': np.float64, 'int[]': np.int32}
+_JAVA_TYPE_NAME_TO_PYTHON_TYPE = {'boolean': bool, 'double': float,  'float': float,
+                                  'byte[]': np.ndarray, 'short[]': np.ndarray, 'double[]': np.ndarray,'int[]': np.ndarray,
+                                  'int': int,  'java.lang.String': str,
                                   'long': int, 'short': int, 'char': int, 'byte': int, 'void': None,
                                   'java.lang.Object': object}
 #type conversions that allow for autocasting
